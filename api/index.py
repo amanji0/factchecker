@@ -41,7 +41,7 @@ async def extract_claims(text: str) -> List[str]:
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is not set on the server")
     prompt = f"""
-    You are an expert fact-checker. Extract up to 5 atomic, verifiable factual claims from the following text.
+    You are an expert fact-checker. Extract up to 10 atomic, verifiable factual claims from the following text.
     Ignore opinions, questions, and vague statements. Return ONLY a JSON list of strings.
 
     Text:
@@ -107,7 +107,8 @@ async def classify_stance(session: httpx.AsyncClient, claim: str, source: Source
     prompt = f"""
     You are an expert fact-checker. You are given a claim and a source text.
     Decide if the source SUPPORTS the claim, CONTRADICTS the claim, or if it is UNCLEAR.
-    Provide a 1-sentence reasoning for your stance based ONLY on the source text.
+    Provide a 1-sentence reasoning for your stance based ONLY on the source text. 
+    Pay special attention to the reliability of the source (e.g. verified news outlets, Wikipedia, official statements).
     Return ONLY JSON in this format: {{"stance": "supports|contradicts|unclear", "reasoning": "..."}}
 
     Claim: {claim}
