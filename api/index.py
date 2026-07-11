@@ -52,10 +52,20 @@ async def get_gemini_model(session: httpx.AsyncClient) -> str:
     for m in data.get("models", []):
         methods = m.get("supportedGenerationMethods", [])
         name = m.get("name", "")
+        # Google API bug: ListModels returns deprecated models. Skip 1.5 and 2.5.
+        if "generateContent" in methods and "flash" in name.lower():
+            if "1.5" not in name and "2.5" not in name:
+                GEMINI_MODEL = name.split("/")[-1]
+                return GEMINI_MODEL
+            
+    # Fallback to any flash model
+    for m in data.get("models", []):
+        methods = m.get("supportedGenerationMethods", [])
+        name = m.get("name", "")
         if "generateContent" in methods and "flash" in name.lower():
             GEMINI_MODEL = name.split("/")[-1]
             return GEMINI_MODEL
-            
+
     for m in data.get("models", []):
         if "generateContent" in m.get("supportedGenerationMethods", []):
             GEMINI_MODEL = m["name"].split("/")[-1]
