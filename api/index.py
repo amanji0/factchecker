@@ -11,11 +11,11 @@ from pydantic import BaseModel, Field
 
 # --- Pipeline Code ---
 
-GEMINI_MODEL = None
+GROQ_MODEL = "llama3-8b-8192"
 MAX_SOURCES_PER_CLAIM = 4
 MAX_INPUT_CHARS = 8000
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 
 @dataclass
@@ -37,45 +37,9 @@ def _strip_fences(raw: str) -> str:
     raw = raw.strip()
     return raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
 
-async def get_gemini_model(session: httpx.AsyncClient) -> str:
-    global GEMINI_MODEL
-    if GEMINI_MODEL:
-        return GEMINI_MODEL
-    resp = await session.get(
-        f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}",
-        timeout=15
-    )
-    data = resp.json()
-    if "error" in data:
-        raise RuntimeError(f"Gemini API Error (ListModels): {data['error'].get('message', 'Unknown error')}")
-    
-    for m in data.get("models", []):
-        methods = m.get("supportedGenerationMethods", [])
-        name = m.get("name", "")
-        # Google API bug: ListModels returns deprecated models. Skip 1.5 and 2.5.
-        if "generateContent" in methods and "flash" in name.lower():
-            if "1.5" not in name and "2.5" not in name:
-                GEMINI_MODEL = name.split("/")[-1]
-                return GEMINI_MODEL
-            
-    # Fallback to any flash model
-    for m in data.get("models", []):
-        methods = m.get("supportedGenerationMethods", [])
-        name = m.get("name", "")
-        if "generateContent" in methods and "flash" in name.lower():
-            GEMINI_MODEL = name.split("/")[-1]
-            return GEMINI_MODEL
-
-    for m in data.get("models", []):
-        if "generateContent" in m.get("supportedGenerationMethods", []):
-            GEMINI_MODEL = m["name"].split("/")[-1]
-            return GEMINI_MODEL
-            
-    raise RuntimeError("No models found for this API key that support generateContent.")
-
 async def extract_claims(text: str) -> List[str]:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY is not set on the server")
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not set on the server")
     prompt = f"""
     You are an expert fact-checker. Extract up to 5 atomic, verifiable factual claims from the following text.
     Ignore opinions, questions, and vague statements. Return ONLY a JSON list of strings.
@@ -85,35 +49,32 @@ async def extract_claims(text: str) -> List[str]:
     """
     async with httpx.AsyncClient() as session:
         try:
-            model_name = await get_gemini_model(session)
             resp = await session.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}",
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
                 json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024}
+                    "model": GROQ_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 1024
                 },
                 timeout=30
             )
             data = resp.json()
             if "error" in data:
-                raise RuntimeError(f"Gemini API Error: {data['error'].get('message', 'Unknown error')}")
+                raise RuntimeError(f"Groq API Error: {data['error'].get('message', 'Unknown error')}")
             
-            # Check if Gemini blocked the response due to safety
-            if "candidates" in data and len(data["candidates"]) > 0:
-                candidate = data["candidates"][0]
-                if "content" not in candidate:
-                    finish_reason = candidate.get("finishReason", "Unknown")
-                    raise RuntimeError(f"Gemini blocked the request. Reason: {finish_reason}")
-                
-                text_response = candidate["content"]["parts"][0]["text"]
+            if "choices" in data and len(data["choices"]) > 0:
+                text_response = data["choices"][0]["message"]["content"]
                 claims = json.loads(_strip_fences(text_response))
                 return claims if isinstance(claims, list) else []
             else:
-                raise RuntimeError("Gemini returned an empty response.")
+                raise RuntimeError("Groq returned an empty response.")
         except Exception as e:
             if isinstance(e, RuntimeError):
                 raise e
             raise RuntimeError(f"Failed to extract claims: {str(e)}")
+
 
 async def search_evidence(session: httpx.AsyncClient, claim: str, domains: Optional[List[str]] = None) -> List[Source]:
     if not TAVILY_API_KEY:
@@ -141,8 +102,8 @@ async def search_evidence(session: httpx.AsyncClient, claim: str, domains: Optio
     ]
 
 async def classify_stance(session: httpx.AsyncClient, claim: str, source: Source) -> Source:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY is not set on the server")
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not set on the server")
     prompt = f"""
     You are an expert fact-checker. You are given a claim and a source text.
     Decide if the source SUPPORTS the claim, CONTRADICTS the claim, or if it is UNCLEAR.
@@ -154,31 +115,28 @@ async def classify_stance(session: httpx.AsyncClient, claim: str, source: Source
     Source Snippet: {source.snippet}
     """
     try:
-        model_name = await get_gemini_model(session)
         resp = await session.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}",
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
             json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 256}
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 256
             },
             timeout=30
         )
         data = resp.json()
         if "error" in data:
-            raise RuntimeError(f"Gemini API Error: {data['error'].get('message', 'Unknown error')}")
+            raise RuntimeError(f"Groq API Error: {data['error'].get('message', 'Unknown error')}")
             
-        if "candidates" in data and len(data["candidates"]) > 0:
-            candidate = data["candidates"][0]
-            if "content" not in candidate:
-                finish_reason = candidate.get("finishReason", "Unknown")
-                raise RuntimeError(f"Gemini blocked the stance check. Reason: {finish_reason}")
-            
-            text_response = candidate["content"]["parts"][0]["text"]
+        if "choices" in data and len(data["choices"]) > 0:
+            text_response = data["choices"][0]["message"]["content"]
             parsed = json.loads(_strip_fences(text_response))
             source.stance = parsed.get("stance", "unclear")
             source.reasoning = parsed.get("reasoning", "")
         else:
-            raise RuntimeError("Gemini returned an empty response for stance.")
+            raise RuntimeError("Groq returned an empty response for stance.")
     except Exception as e:
         if isinstance(e, RuntimeError):
             raise e
