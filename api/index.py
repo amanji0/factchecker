@@ -61,14 +61,22 @@ async def extract_claims(text: str) -> List[str]:
             if "error" in data:
                 raise RuntimeError(f"Gemini API Error: {data['error'].get('message', 'Unknown error')}")
             
-            text_response = data["candidates"][0]["content"]["parts"][0]["text"]
-            claims = json.loads(_strip_fences(text_response))
-            return claims if isinstance(claims, list) else []
+            # Check if Gemini blocked the response due to safety
+            if "candidates" in data and len(data["candidates"]) > 0:
+                candidate = data["candidates"][0]
+                if "content" not in candidate:
+                    finish_reason = candidate.get("finishReason", "Unknown")
+                    raise RuntimeError(f"Gemini blocked the request. Reason: {finish_reason}")
+                
+                text_response = candidate["content"]["parts"][0]["text"]
+                claims = json.loads(_strip_fences(text_response))
+                return claims if isinstance(claims, list) else []
+            else:
+                raise RuntimeError("Gemini returned an empty response.")
         except Exception as e:
             if isinstance(e, RuntimeError):
                 raise e
-            print(f"Error extracting claims: {e}")
-            return []
+            raise RuntimeError(f"Failed to extract claims: {str(e)}")
 
 async def search_evidence(session: httpx.AsyncClient, claim: str, domains: Optional[List[str]] = None) -> List[Source]:
     if not TAVILY_API_KEY:
@@ -121,10 +129,18 @@ async def classify_stance(session: httpx.AsyncClient, claim: str, source: Source
         if "error" in data:
             raise RuntimeError(f"Gemini API Error: {data['error'].get('message', 'Unknown error')}")
             
-        text_response = data["candidates"][0]["content"]["parts"][0]["text"]
-        parsed = json.loads(_strip_fences(text_response))
-        source.stance = parsed.get("stance", "unclear")
-        source.reasoning = parsed.get("reasoning", "")
+        if "candidates" in data and len(data["candidates"]) > 0:
+            candidate = data["candidates"][0]
+            if "content" not in candidate:
+                finish_reason = candidate.get("finishReason", "Unknown")
+                raise RuntimeError(f"Gemini blocked the stance check. Reason: {finish_reason}")
+            
+            text_response = candidate["content"]["parts"][0]["text"]
+            parsed = json.loads(_strip_fences(text_response))
+            source.stance = parsed.get("stance", "unclear")
+            source.reasoning = parsed.get("reasoning", "")
+        else:
+            raise RuntimeError("Gemini returned an empty response for stance.")
     except Exception as e:
         if isinstance(e, RuntimeError):
             raise e
