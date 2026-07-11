@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 # --- Pipeline Code ---
 
-GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL = None
 MAX_SOURCES_PER_CLAIM = 4
 MAX_INPUT_CHARS = 8000
 
@@ -37,6 +37,32 @@ def _strip_fences(raw: str) -> str:
     raw = raw.strip()
     return raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
 
+async def get_gemini_model(session: httpx.AsyncClient) -> str:
+    global GEMINI_MODEL
+    if GEMINI_MODEL:
+        return GEMINI_MODEL
+    resp = await session.get(
+        f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}",
+        timeout=15
+    )
+    data = resp.json()
+    if "error" in data:
+        raise RuntimeError(f"Gemini API Error (ListModels): {data['error'].get('message', 'Unknown error')}")
+    
+    for m in data.get("models", []):
+        methods = m.get("supportedGenerationMethods", [])
+        name = m.get("name", "")
+        if "generateContent" in methods and "flash" in name.lower():
+            GEMINI_MODEL = name.split("/")[-1]
+            return GEMINI_MODEL
+            
+    for m in data.get("models", []):
+        if "generateContent" in m.get("supportedGenerationMethods", []):
+            GEMINI_MODEL = m["name"].split("/")[-1]
+            return GEMINI_MODEL
+            
+    raise RuntimeError("No models found for this API key that support generateContent.")
+
 async def extract_claims(text: str) -> List[str]:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not set on the server")
@@ -49,8 +75,9 @@ async def extract_claims(text: str) -> List[str]:
     """
     async with httpx.AsyncClient() as session:
         try:
+            model_name = await get_gemini_model(session)
             resp = await session.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}",
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024}
@@ -117,8 +144,9 @@ async def classify_stance(session: httpx.AsyncClient, claim: str, source: Source
     Source Snippet: {source.snippet}
     """
     try:
+        model_name = await get_gemini_model(session)
         resp = await session.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}",
             json={
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": 0.1, "maxOutputTokens": 256}
